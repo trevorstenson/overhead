@@ -983,3 +983,19 @@ test('in events mode the pane drops in on an interesting aircraft, and leaves af
   await world.clock.advance(91 * 1000)
   expect(world.events.at(-1)).toMatch(/^close/)
 })
+
+test('the window view can be lined up with a real window: fov, nudges and a readout', async ($, on) => {
+  const { ui, controls } = await openWithMap($, on)
+  await ui.press({ key: 'view' })
+  expect((await ui.find({ type: 'Text', text: /facing 110° E \(auto\) · 90° wide/ }))).toBeDefined()
+  expect((await $.command.run({ command: 'radar', args: 'fov 60' })).text).toBe('The window view spans 60° of sky.')
+  await ui.press({ key: 'left' })
+  expect(controls.at(-1)).toContain('face 108')
+  expect(controls.at(-1)).toContain('fov 60')
+  // A drag across a tenth of a 60° view turns it 6°
+  await ui.pointer({ type: 'down', button: 'left', x: 50, y: 14, in: 'input' })
+  await ui.pointer({ type: 'move', button: 'left', x: 60, y: 14, in: 'input' })
+  await ui.pointer({ type: 'up', button: 'left', x: 60, y: 14, in: 'input' })
+  expect(controls.at(-1)).toContain('face 102')
+  expect((await $.command.run({ command: 'radar', args: 'calibrate' })).text).toContain('Press j or k')
+})

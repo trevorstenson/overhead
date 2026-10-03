@@ -41,6 +41,9 @@ let rangeNm = DEFAULT_RANGE_NM
 let view = 'radar'
 // A bearing in degrees, or 'auto' for the busiest airport nearby
 let face = 'auto'
+// How many degrees of sky the window view spans: matched to a real window,
+// which is usually narrower than the 90° default
+let fov = 90
 // 'altitude', tar1090's colors by height, or 'status': arriving, departing…
 let colors = 'altitude'
 // Keeping the picked aircraft in the middle of the radar
@@ -277,7 +280,7 @@ async function writeControl($) {
   const parts = ['range', String(rangeNm), 'paused', isOpen && !isDesktop ? '0' : '1', 'select', selected ?? '-', 'view', view, 'face', String(face)]
   if (size) parts.push('columns', String(size.columns), 'rows', String(size.rows))
   if (click) parts.push('click', String(click.n), click.x.toFixed(4), click.y.toFixed(4))
-  parts.push('pan', pan.x.toFixed(3), pan.y.toFixed(3), 'colors', colors, 'follow', isFollowing && selected ? '1' : '0', 'rewind', String(rewindSec), 'photo', String(photoColumns))
+  parts.push('pan', pan.x.toFixed(3), pan.y.toFixed(3), 'colors', colors, 'follow', isFollowing && selected ? '1' : '0', 'rewind', String(rewindSec), 'photo', String(photoColumns), 'fov', String(fov))
   await $.fs.write(controlPath, parts.join(' ') + '\n')
 }
 
@@ -1372,7 +1375,7 @@ async function drag($, dx, dy) {
   keepOpen()
   if (view === 'window') {
     const from = typeof face === 'number' ? face : faceNow ?? 180
-    face = Math.round((((from - dx * 90) % 360) + 360) % 360)
+    face = Math.round((((from - dx * fov) % 360) + 360) % 360)
     // Saved once the turning stops, not on every step of it
     faceSaveTimer?.cancel()
     faceSaveTimer = $.clock.after(800, () => void $.store.set('face', face))
@@ -1399,6 +1402,25 @@ async function recenter($) {
   await writeControl($)
   $.ui.invalidate('ui.render')
 }
+
+// Turns the window a couple of degrees: fine alignment against the real sky
+async function nudge($, degrees) {
+  keepOpen()
+  const from = typeof face === 'number' ? face : faceNow ?? 180
+  face = (((from + degrees) % 360) + 360) % 360
+  await $.store.set('face', face)
+  await writeControl($)
+  $.ui.invalidate('ui.render')
+}
+
+const CALIBRATE = [
+  'Lining the window view up with your real window:',
+  '1. /radar face <direction your window looks>, e.g. /radar face SE or 135 (a phone compass helps)',
+  '2. /radar fov <degrees>: about 60 for a typical window seen from a desk, 90 if you stand at it',
+  '3. When you can see a plane outside, pick it (click it, or 1–5); its label is ringed in yellow',
+  '4. Press j or k (2° at a time) or drag until the ring sits where you see the plane',
+  'The view then stays put: /radar face auto goes back to facing the busiest airport.',
+].join('\n')
 
 async function zoom($, step) {
   keepOpen()
@@ -1430,7 +1452,8 @@ const HELP = [
   '/radar rewind 10m|live  the sky as it was, up to 30 min back (b back, n forward, l live)',
   '/radar summary on|off  a line under each longer answer: what flew over while Claude worked',
   '/radar view radar|window   top-down, or the sky out of a window (v swaps)',
-  '/radar face <dir>      which way the window faces: N, SW, 135 or auto',
+  '/radar face <dir>      which way the window faces: N, SW, 135 or auto (j/k nudge 2°)',
+  '/radar fov <deg>       how wide the window view is; /radar calibrate walks through lining it up',
   '/radar auto events|always|off   drop in when something worth seeing happens (default),',
   '                       5 s into every turn, or never',
   '/radar alerts on|off   a toast when an aircraft is about to pass overhead',
@@ -1473,6 +1496,22 @@ async function runCommand($, args) {
     await $.store.set('view', view)
     await writeControl($)
     return { text: view === 'window' ? 'The sky from home, facing ' + faceText() + '.' : 'Top-down radar.' }
+  }
+  if (verb === 'fov') {
+    const deg = Number(arg)
+    if (!(deg >= 20 && deg <= 140)) return { text: 'The window view spans ' + fov + '°. /radar fov <20–140>: about 60 for a window seen from a desk.' }
+    fov = deg
+    await $.store.set('fov', fov)
+    await writeControl($)
+    return { text: 'The window view spans ' + fov + '° of sky.' }
+  }
+  if (verb === 'calibrate') {
+    if (view !== 'window') {
+      view = 'window'
+      await $.store.set('view', view)
+      await writeControl($)
+    }
+    return { text: CALIBRATE }
   }
   if (verb === 'face') {
     const next = parseFace(arg)
@@ -1617,6 +1656,7 @@ export function register(on) {
     isPhotoShown = (await $.store.get('isPhotoShown')) ?? true
     watches = (await $.store.get('watches')) ?? []
     face = (await $.store.get('face')) ?? 'auto'
+    fov = (await $.store.get('fov')) ?? 90
     isAlerting = (await $.store.get('isAlerting')) ?? true
     quiet = (await $.store.get('quiet')) ?? DEFAULT_QUIET
     await $.command.register({
@@ -1784,7 +1824,12 @@ export function register(on) {
       }
     }
 
-    const facts = [homeText(), rangeNm + ' nm', aircraft.length + ' aircraft', ...(rewindSec ? ['⏪ ' + rewindText()] : []), ...(isDesktop ? [] : [fps + ' fps'])].join(' · ')
+    const facing = faceNow ?? (typeof face === 'number' ? face : null)
+    const viewFacts =
+      view === 'window' && facing != null
+        ? ['facing ' + Math.round(facing) + '° ' + COMPASS[Math.round(facing / 45) % 8] + (face === 'auto' ? ' (auto)' : ''), fov + '° wide']
+        : [rangeNm + ' nm']
+    const facts = [homeText(), ...viewFacts, aircraft.length + ' aircraft', ...(rewindSec ? ['⏪ ' + rewindText()] : []), ...(isDesktop ? [] : [fps + ' fps'])].join(' · ')
     const footer = Box({
       flexDirection: 'column',
       children: [
@@ -1855,6 +1900,12 @@ export function register(on) {
               ? [
                   Button({ key: 'forward', label: '1 min on', hotkey: 'n', plain: true, onPress: () => setRewind($, rewindSec - 60) }),
                   Button({ key: 'live', label: 'live', hotkey: 'l', plain: true, onPress: () => setRewind($, 0) }),
+                ]
+              : []),
+            ...(view === 'window' && !isDesktop
+              ? [
+                  Button({ key: 'left', label: 'turn left', hotkey: 'j', plain: true, onPress: () => nudge($, -2) }),
+                  Button({ key: 'right', label: 'turn right', hotkey: 'k', plain: true, onPress: () => nudge($, 2) }),
                 ]
               : []),
             ...(view === 'radar'

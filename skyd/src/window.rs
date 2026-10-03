@@ -9,7 +9,9 @@ use crate::render::{Canvas, SELECTED, dim, label_text, status_color};
 use crate::track::{Point, Status, Store, Track};
 use std::time::{Instant, SystemTime};
 
-const FOV_DEG: f64 = 90.0;
+/// How wide a slice of sky the view shows unless told otherwise; a real
+/// window is often narrower, and `fov` makes the picture match it
+pub const DEFAULT_FOV_DEG: f64 = 90.0;
 const PITCH_DEG: f64 = 20.0;
 const NM_M: f64 = 1852.0;
 const FT_M: f64 = 0.3048;
@@ -21,6 +23,8 @@ const COMPASS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
 pub struct Window {
     /// The bearing the window faces, 0 north
     pub face_deg: f64,
+    /// Degrees of sky across the picture
+    pub fov_deg: f64,
     pub selected: Option<String>,
     /// Previews only: draw the sky at this time, and with this cloud cover
     pub at: Option<SystemTime>,
@@ -44,7 +48,7 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 impl Camera {
-    fn new(face_deg: f64, width: f64, height: f64, aspect: f64) -> Self {
+    fn new(face_deg: f64, fov_deg: f64, width: f64, height: f64, aspect: f64) -> Self {
         let (b, p) = (face_deg.to_radians(), PITCH_DEG.to_radians());
         // East, north, up
         let forward = [b.sin() * p.cos(), b.cos() * p.cos(), p.sin()];
@@ -54,7 +58,7 @@ impl Camera {
             right[2] * forward[0] - right[0] * forward[2],
             right[0] * forward[1] - right[1] * forward[0],
         ];
-        let focal_x = (width / 2.0) / (FOV_DEG / 2.0).to_radians().tan();
+        let focal_x = (width / 2.0) / (fov_deg / 2.0).to_radians().tan();
         Self { forward, right, up, focal_x, focal_y: focal_x * aspect, cx: width / 2.0, cy: height / 2.0 }
     }
 
@@ -143,7 +147,7 @@ impl Window {
         if let Some(cloud) = self.cloud {
             weather.cloud = cloud;
         }
-        let camera = Camera::new(self.face_deg, canvas.width as f64, canvas.height as f64, canvas.aspect);
+        let camera = Camera::new(self.face_deg, self.fov_deg, canvas.width as f64, canvas.height as f64, canvas.aspect);
         // Wall-clock seconds: clouds drift and the strobe blinks by it
         let t = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
         self.paint_sky(canvas, &camera, env, sun, weather, t);
@@ -332,7 +336,7 @@ mod tests {
 
     #[test]
     fn straight_ahead_lands_mid_frame_and_up_lands_higher() {
-        let camera = Camera::new(90.0, 200.0, 100.0, 1.0);
+        let camera = Camera::new(90.0, DEFAULT_FOV_DEG, 200.0, 100.0, 1.0);
         // Due east, tilted up by the camera's pitch: dead centre
         let p = PITCH_DEG.to_radians();
         let (x, y) = camera.project([p.cos(), 0.0, p.sin()]).unwrap();
@@ -346,7 +350,7 @@ mod tests {
 
     #[test]
     fn rays_invert_projection() {
-        let camera = Camera::new(200.0, 160.0, 90.0, 0.5);
+        let camera = Camera::new(200.0, DEFAULT_FOV_DEG, 160.0, 90.0, 0.5);
         let (bearing, elevation) = camera.ray(40.0, 20.0);
         let d = [bearing.sin() * elevation.cos(), bearing.cos() * elevation.cos(), elevation.sin()];
         let (x, y) = camera.project(d).unwrap();

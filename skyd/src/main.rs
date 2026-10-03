@@ -126,6 +126,8 @@ struct Control {
     rewind: Option<u64>,
     /// How many cells wide to make the picked aircraft's photo
     photo: Option<usize>,
+    /// Degrees of sky across the window view
+    fov: Option<f64>,
 }
 
 fn parse_control(text: &str) -> Control {
@@ -166,6 +168,7 @@ fn parse_control(text: &str) -> Control {
             "follow" => control.follow = Some(*value == "1"),
             "rewind" => control.rewind = value.parse().ok(),
             "photo" => control.photo = value.parse().ok(),
+            "fov" => control.fov = value.parse().ok().map(|f: f64| f.clamp(20.0, 140.0)),
             "click" => {}
             _ => {}
         }
@@ -581,7 +584,7 @@ fn run(args: Args) -> Result<(), String> {
     let mut pan_reported = Instant::now();
     let mut reported_scale = (0.0, 0.0);
     let mut reported_face = f64::NAN;
-    let mut window = window::Window { face_deg: 180.0, selected: None, at: args.at, cloud: args.cloud };
+    let mut window = window::Window { face_deg: 180.0, fov_deg: window::DEFAULT_FOV_DEG, selected: None, at: args.at, cloud: args.cloud };
     let mut is_window = false;
     let mut face_auto = true;
     let env = env::Env::start(home.lat, home.lon);
@@ -690,6 +693,7 @@ fn run(args: Args) -> Result<(), String> {
                 rewind = Duration::from_secs(next.rewind.unwrap_or(0).min(HISTORY.as_secs()));
                 window.selected = radar.selected.clone();
                 is_window = next.view.as_deref() == Some("window");
+                window.fov_deg = next.fov.unwrap_or(window::DEFAULT_FOV_DEG);
                 match next.face.as_deref().map(str::parse::<f64>) {
                     Some(Ok(deg)) => {
                         window.face_deg = deg.rem_euclid(360.0);
