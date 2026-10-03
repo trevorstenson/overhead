@@ -257,6 +257,10 @@ pub struct Radar {
     pub by_altitude: bool,
     /// Runways landing traffic is using, threshold to far end
     pub landing: Vec<(Point, Point)>,
+    /// An old ATC scope: green phosphor, a sweep, blips that fade between passes
+    pub scope: bool,
+    /// Where the scope's sweep points this frame, degrees from north
+    sweep_deg: f64,
     /// The map drawn for the current view, kept until the view changes
     layer: Option<(LayerKey, Vec<u8>)>,
 }
@@ -269,7 +273,26 @@ struct LayerKey {
     range_milli: i64,
     pan_milli: (i64, i64),
     map: usize,
+    scope: bool,
 }
+
+/// The colors of the map under the radar, for each look
+struct Palette {
+    land: u32,
+    sea: u32,
+    coast: u32,
+    runway: u32,
+    ring: u32,
+    axis: u32,
+}
+
+const MAP_PALETTE: Palette = Palette { land: LAND, sea: SEA, coast: COAST, runway: RUNWAY, ring: RING, axis: AXIS };
+const SCOPE_PALETTE: Palette = Palette { land: 0x020a05, sea: 0x03110a, coast: 0x1f6b3a, runway: 0x2f8f50, ring: 0x135c2c, axis: 0x0c3a1c };
+/// A scope's phosphor: dim between sweeps, near white as the sweep crosses
+const PHOSPHOR_DIM: u32 = 0x0f5c2a;
+const PHOSPHOR_BRIGHT: u32 = 0xc8ffd8;
+/// One turn of the sweep, in seconds
+const SWEEP_PERIOD_S: f64 = 4.0;
 
 const LAND: u32 = 0x0d121b;
 const SEA: u32 = 0x0a1a2c;
@@ -314,7 +337,7 @@ fn hsl(h: f64, s: f64, l: f64) -> u32 {
 
 impl Radar {
     pub fn new(range_nm: f64) -> Self {
-        Self { range_nm, selected: None, pan: Point::default(), by_altitude: true, landing: Vec::new(), layer: None }
+        Self { range_nm, selected: None, pan: Point::default(), by_altitude: true, landing: Vec::new(), scope: false, sweep_deg: 0.0, layer: None }
     }
 
     /// Pixels per nm, counted in pixel heights; across, a pixel is narrower
@@ -327,6 +350,26 @@ impl Radar {
     pub fn span_nm(&self, canvas: &Canvas) -> (f64, f64) {
         let scale = self.scale(canvas);
         (canvas.width as f64 * canvas.aspect / scale, canvas.height as f64 / scale)
+    }
+
+    fn palette(&self) -> &'static Palette {
+        if self.scope { &SCOPE_PALETTE } else { &MAP_PALETTE }
+    }
+
+    /// How brightly a point glows on the scope: full as the sweep crosses
+    /// its bearing, fading over the turn after
+    fn glow(&self, p: Point) -> f64 {
+        let behind = (self.sweep_deg - p.bearing()).rem_euclid(360.0) / 360.0 * SWEEP_PERIOD_S;
+        (-behind / 1.6).exp()
+    }
+
+    /// An aircraft's color on this radar: phosphor on the scope, else by
+    /// altitude or status
+    fn blip_color(&self, track: &Track, p: Point) -> u32 {
+        if self.scope {
+            return mix_colors(PHOSPHOR_DIM, PHOSPHOR_BRIGHT, self.glow(p));
+        }
+        self.color_of(track, track.aircraft.alt_ft)
     }
 
     fn color_of(&self, track: &Track, alt: Option<i32>) -> u32 {
@@ -342,25 +385,27 @@ impl Radar {
             range_milli: (self.range_nm * 1000.0) as i64,
             pan_milli: ((self.pan.x * 1000.0) as i64, (self.pan.y * 1000.0) as i64),
             map: map.map(|m| m as *const Map as usize).unwrap_or(0),
+            scope: self.scope,
         };
+        let palette = self.palette();
         if let Some((k, rgb)) = &self.layer {
             if *k == key {
                 canvas.rgb.copy_from_slice(rgb);
                 return;
             }
         }
-        canvas.fill(LAND);
+        canvas.fill(palette.land);
         if let Some(map) = map {
             if map.has_coast() {
-                paint_sea(canvas, map, to_px, from_px);
+                paint_sea(canvas, map, to_px, from_px, palette.sea);
             }
             for ring in &map.water {
                 let points: Vec<(f64, f64)> = ring.iter().map(|p| to_px(*p)).collect();
-                canvas.fill_polygon(&points, SEA);
+                canvas.fill_polygon(&points, palette.sea);
             }
             for line in &map.coast {
                 for pair in line.windows(2) {
-                    canvas.line(to_px(pair[0]), to_px(pair[1]), COAST, 1.0);
+                    canvas.line(to_px(pair[0]), to_px(pair[1]), palette.coast, 1.0);
                 }
             }
             for (a, b, width_m) in &map.runways {
@@ -373,7 +418,7 @@ impl Radar {
                 let steps = (half * 2.0).ceil().max(1.0) as i64;
                 for i in 0..=steps {
                     let o = -half + i as f64 * (2.0 * half / steps as f64);
-                    canvas.line((pa.0 + nx * o, pa.1 + ny * o), (pb.0 + nx * o, pb.1 + ny * o), RUNWAY, 1.0);
+                    canvas.line((pa.0 + nx * o, pa.1 + ny * o), (pb.0 + nx * o, pb.1 + ny * o), palette.runway, 1.0);
                 }
             }
         }
@@ -382,6 +427,10 @@ impl Radar {
 
     pub fn draw(&mut self, canvas: &mut Canvas, store: &Store, map: Option<&Map>, picked: &Picked, now: Instant) {
         canvas.clear(BACKGROUND);
+        self.sweep_deg = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() % SWEEP_PERIOD_S / SWEEP_PERIOD_S * 360.0)
+            .unwrap_or(0.0);
         let aspect = canvas.aspect;
         let scale = self.scale(canvas);
         let (w, h) = (canvas.width as f64, canvas.height as f64);
@@ -396,13 +445,30 @@ impl Radar {
             .iter()
             .map(|(x, y)| ((x - hx) * aspect).hypot(y - hy) / scale)
             .fold(0.0, f64::max);
-        canvas.line((0.0, hy), (w, hy), AXIS, 0.6);
-        canvas.line((hx, 0.0), (hx, h), AXIS, 0.6);
+        let palette = self.palette();
+        canvas.line((0.0, hy), (w, hy), palette.axis, 0.6);
+        canvas.line((hx, 0.0), (hx, h), palette.axis, 0.6);
         let step = ring_step(self.range_nm);
         let mut ring = step;
         while ring < reach {
-            canvas.circle((hx, hy), ring * scale, RING);
+            canvas.circle((hx, hy), ring * scale, palette.ring);
             ring += step;
+        }
+
+        // The sweep, with a fading wake behind it
+        if self.scope {
+            let radius = reach * scale;
+            // Dense enough near the edge that the wake reads as one glow
+            let steps = ((radius * 0.42).ceil() as usize).clamp(16, 160);
+            for i in 0..steps {
+                let t = i as f64 / steps as f64;
+                let b = (self.sweep_deg - t * 24.0).to_radians();
+                let end = (hx + b.sin() * radius / aspect, hy - b.cos() * radius);
+                // Lines overlap near the centre, so each adds only a little
+                canvas.line((hx, hy), end, 0x3cff7a, 0.07 * (1.0 - t).powf(1.5));
+            }
+            let b = self.sweep_deg.to_radians();
+            canvas.line((hx, hy), (hx + b.sin() * radius / aspect, hy - b.cos() * radius), 0x8cffb0, 0.85);
         }
 
         // Runways in use for landing, green, with the approach dashed out 4 nm
@@ -442,14 +508,16 @@ impl Radar {
             let n = track.trail.len();
             for (i, pair) in track.trail.iter().collect::<Vec<_>>().windows(2).enumerate() {
                 let alpha = 0.15 + 0.45 * (i as f64 / n.max(1) as f64);
-                canvas.line(to_px(pair[0].1), to_px(pair[1].1), self.color_of(track, pair[1].2), alpha);
+                // On the scope a trail is the phosphor's afterglow
+                let color = if self.scope { PHOSPHOR_DIM } else { self.color_of(track, pair[1].2) };
+                canvas.line(to_px(pair[0].1), to_px(pair[1].1), color, alpha);
             }
         }
 
         let flash = flash_on();
         for (track, p) in &tracks {
             let a = &track.aircraft;
-            let color = self.color_of(track, a.alt_ft);
+            let color = self.blip_color(track, *p);
             canvas.hit(&a.hex, to_px(*p));
             // A leader line: where it will be in a minute
             if let (Some(heading), false) = (a.track_deg, a.is_on_ground()) {
@@ -469,11 +537,11 @@ impl Radar {
             }
         }
 
-        canvas.disc((hx, hy), if canvas.is_cells() { 0.6 } else { 3.0 }, HOME);
+        canvas.disc((hx, hy), if canvas.is_cells() { 0.6 } else { 3.0 }, if self.scope { PHOSPHOR_BRIGHT } else { HOME });
 
         if canvas.is_cells() {
             self.label(canvas, (hx, hy), scale, reach, &tracks, map, picked, flash);
-        } else {
+        } else if !self.scope {
             self.legend_bar(canvas);
         }
     }
@@ -496,7 +564,7 @@ impl Radar {
         // Aircraft glyphs first, nearest last so it wins a shared cell
         for (track, p) in tracks {
             let (column, row) = cell(canvas, *p);
-            let color = if track.aircraft.emergency_kind().is_some() { EMERGENCY } else { self.color_of(track, track.aircraft.alt_ft) };
+            let color = if track.aircraft.emergency_kind().is_some() { EMERGENCY } else { self.blip_color(track, *p) };
             canvas.put_text(column, row, &glyph(track).to_string(), color);
         }
         let (hc, hr) = canvas.cell_of((cx, cy));
@@ -555,7 +623,9 @@ impl Radar {
                 canvas.put_text(column, row, &glyph(track).to_string(), SELECTED);
                 continue;
             }
-            let color = if a.is_military {
+            let color = if self.scope {
+                dim(self.blip_color(track, *p), 0.9)
+            } else if a.is_military {
                 MILITARY
             } else if a.interest.is_some() {
                 INTERESTING
@@ -582,7 +652,7 @@ impl Radar {
             ring += step;
         }
 
-        if self.by_altitude {
+        if self.by_altitude && !self.scope {
             self.legend_text(canvas);
         }
     }
@@ -621,7 +691,7 @@ impl Radar {
 /// spikes (a line out to a point and straight back) and a few loose ends, and
 /// the side test alone sweeps wedges of wrong color out from them; here
 /// they're a few outvoted samples.
-fn paint_sea(canvas: &mut Canvas, map: &Map, to_px: &dyn Fn(Point) -> (f64, f64), from_px: &dyn Fn(f64, f64) -> Point) {
+fn paint_sea(canvas: &mut Canvas, map: &Map, to_px: &dyn Fn(Point) -> (f64, f64), from_px: &dyn Fn(f64, f64) -> Point, sea: u32) {
     let stride = if canvas.is_cells() { 1 } else { 2 };
     let (gw, gh) = (canvas.width.div_ceil(stride), canvas.height.div_ceil(stride));
     let mut wall = vec![false; gw * gh];
@@ -698,11 +768,20 @@ fn paint_sea(canvas: &mut Canvas, map: &Map, to_px: &dyn Fn(Point) -> (f64, f64)
             let (x, y) = ((i % gw) * stride, (i / gw) * stride);
             for dy in 0..stride {
                 for dx in 0..stride {
-                    canvas.plot((x + dx) as i64, (y + dy) as i64, SEA, 1.0);
+                    canvas.plot((x + dx) as i64, (y + dy) as i64, sea, 1.0);
                 }
             }
         }
     }
+}
+
+fn mix_colors(a: u32, b: u32, t: f64) -> u32 {
+    let t = t.clamp(0.0, 1.0);
+    let channel = |shift: u32| {
+        let (x, y) = (((a >> shift) & 0xff) as f64, ((b >> shift) & 0xff) as f64);
+        ((x + (y - x) * t).round() as u32) << shift
+    };
+    channel(16) | channel(8) | channel(0)
 }
 
 /// Range rings a readable distance apart for the zoom: about four across

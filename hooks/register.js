@@ -46,6 +46,8 @@ let face = 'auto'
 let fov = 90
 // 'altitude', tar1090's colors by height, or 'status': arriving, departing…
 let colors = 'altitude'
+// 'map', or 'scope': an old ATC scope, green phosphor with a sweep
+let theme = 'map'
 // Keeping the picked aircraft in the middle of the radar
 let isFollowing = false
 // How far into the past the radar shows, in seconds (0 is live), and how far
@@ -280,7 +282,7 @@ async function writeControl($) {
   const parts = ['range', String(rangeNm), 'paused', isOpen && !isDesktop ? '0' : '1', 'select', selected ?? '-', 'view', view, 'face', String(face)]
   if (size) parts.push('columns', String(size.columns), 'rows', String(size.rows))
   if (click) parts.push('click', String(click.n), click.x.toFixed(4), click.y.toFixed(4))
-  parts.push('pan', pan.x.toFixed(3), pan.y.toFixed(3), 'colors', colors, 'follow', isFollowing && selected ? '1' : '0', 'rewind', String(rewindSec), 'photo', String(photoColumns), 'fov', String(fov))
+  parts.push('pan', pan.x.toFixed(3), pan.y.toFixed(3), 'colors', colors, 'follow', isFollowing && selected ? '1' : '0', 'rewind', String(rewindSec), 'photo', String(photoColumns), 'fov', String(fov), 'theme', theme)
   await $.fs.write(controlPath, parts.join(' ') + '\n')
 }
 
@@ -1330,6 +1332,14 @@ function photoRows() {
   return Math.max(1, Math.round((photoColumns * photo.height) / photo.width / 2)) + 1
 }
 
+async function toggleTheme($) {
+  keepOpen()
+  theme = theme === 'map' ? 'scope' : 'map'
+  await $.store.set('theme', theme)
+  await writeControl($)
+  $.ui.invalidate('ui.render')
+}
+
 async function toggleColors($) {
   colors = colors === 'altitude' ? 'status' : 'altitude'
   await $.store.set('colors', colors)
@@ -1445,6 +1455,7 @@ const HELP = [
   '/radar center          put home back in the middle after dragging',
   '/radar follow          keep the picked aircraft in the middle (f)',
   '/radar colors altitude|status   color by height, or by arriving/departing (a)',
+  '/radar theme map|scope the map, or an old ATC scope with a sweep (t)',
   '/radar open            open the picked aircraft in Flightradar24 (o)',
   '/radar watch <words>   a toast when something matching shows up, e.g. "any 747 within 20 miles"',
   '/radar watch           your watches; /radar unwatch <n|all> removes them',
@@ -1588,6 +1599,13 @@ async function runCommand($, args) {
     await $.store.set('isSummary', isSummary)
     return { text: isSummary ? 'A line under each longer answer says what flew over while Claude worked.' : 'No lines about the sky under answers.' }
   }
+  if (verb === 'theme') {
+    if (arg !== 'map' && arg !== 'scope') return { text: 'The radar looks like a ' + theme + '. /radar theme map|scope' }
+    theme = arg
+    await $.store.set('theme', theme)
+    await writeControl($)
+    return { text: theme === 'scope' ? 'An old ATC scope: green phosphor, a sweep, blips that fade between passes.' : 'The map: coast, runways, altitude colors.' }
+  }
   if (verb === 'colors' || verb === 'colours') {
     if (arg !== 'altitude' && arg !== 'status') return { text: 'Colors by ' + colors + '. /radar colors altitude|status' }
     colors = arg
@@ -1652,6 +1670,7 @@ export function register(on) {
     autoMode = (await $.store.get('autoMode')) ?? ((await $.store.get('isAuto')) === true ? 'events' : 'off')
     view = (await $.store.get('view')) ?? 'radar'
     colors = (await $.store.get('colors')) ?? 'altitude'
+    theme = (await $.store.get('theme')) ?? 'map'
     isSummary = (await $.store.get('isSummary')) ?? true
     isPhotoShown = (await $.store.get('isPhotoShown')) ?? true
     watches = (await $.store.get('watches')) ?? []
@@ -1908,7 +1927,10 @@ export function register(on) {
                   Button({ key: 'right', label: 'turn right', hotkey: 'k', plain: true, onPress: () => nudge($, 2) }),
                 ]
               : []),
-            ...(view === 'radar'
+            ...(view === 'radar' && !isDesktop
+              ? [Button({ key: 'theme', label: theme === 'map' ? 'scope' : 'map', hotkey: 't', plain: true, onPress: () => toggleTheme($) })]
+              : []),
+            ...(view === 'radar' && theme === 'map'
               ? [Button({ key: 'colors', label: colors === 'altitude' ? 'status colors' : 'altitude colors', hotkey: 'a', plain: true, onPress: () => toggleColors($) })]
               : []),
             ...(isDesktop

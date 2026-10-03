@@ -100,6 +100,7 @@ struct Args {
     at: Option<std::time::SystemTime>,
     cloud: Option<f64>,
     select: Option<String>,
+    theme: Option<String>,
 }
 
 /// What the control file asks for; None leaves a setting as it is
@@ -128,6 +129,8 @@ struct Control {
     photo: Option<usize>,
     /// Degrees of sky across the window view
     fov: Option<f64>,
+    /// `map`, or `scope`: green phosphor and a sweep
+    theme: Option<String>,
 }
 
 fn parse_control(text: &str) -> Control {
@@ -168,6 +171,7 @@ fn parse_control(text: &str) -> Control {
             "follow" => control.follow = Some(*value == "1"),
             "rewind" => control.rewind = value.parse().ok(),
             "photo" => control.photo = value.parse().ok(),
+            "theme" => control.theme = Some(value.to_string()),
             "fov" => control.fov = value.parse().ok().map(|f: f64| f.clamp(20.0, 140.0)),
             "click" => {}
             _ => {}
@@ -190,6 +194,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<Args, String
     let mut view = String::from("radar");
     let (mut at, mut cloud) = (None, None);
     let mut select = None;
+    let mut theme = None;
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or(format!("{flag} needs a value"));
         let int = |s: String| s.parse::<usize>().map_err(|e| format!("{s}: {e}"));
@@ -214,6 +219,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<Args, String
             "--cloud" => cloud = Some(float(value()?)?.clamp(0.0, 1.0)),
             // Previews: draw with this aircraft picked
             "--select" => select = Some(value()?),
+            "--theme" => theme = Some(value()?),
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -228,7 +234,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<Args, String
         "ppm" => Mode::Ppm { width, height },
         other => return Err(format!("unknown mode {other}")),
     };
-    Ok(Args { mode, fps: fps.clamp(1, 120), home: Home { lat, lon }, range_nm, source, poll: Duration::from_secs_f64(poll), input, view, at, cloud, select })
+    Ok(Args { mode, fps: fps.clamp(1, 120), home: Home { lat, lon }, range_nm, source, poll: Duration::from_secs_f64(poll), input, view, at, cloud, select, theme })
 }
 
 fn main() {
@@ -623,6 +629,7 @@ fn run(args: Args) -> Result<(), String> {
                     radar.landing = report.landing_lines;
                 }
             }
+            radar.scope = args.theme.as_deref() == Some("scope");
             // A picked aircraft brings its route and its track, given a moment
             radar.selected = args.select.clone();
             if radar.selected.is_some() {
@@ -689,6 +696,7 @@ fn run(args: Args) -> Result<(), String> {
                 let (px, py) = next.pan.unwrap_or_default();
                 radar.pan = track::Point { x: px, y: py };
                 radar.by_altitude = next.colors.as_deref() != Some("status");
+                radar.scope = next.theme.as_deref() == Some("scope");
                 following = next.follow == Some(true);
                 rewind = Duration::from_secs(next.rewind.unwrap_or(0).min(HISTORY.as_secs()));
                 window.selected = radar.selected.clone();

@@ -1,6 +1,6 @@
 # Overhead
 
-Live aircraft over wherever you are, inside Claude Code. While Claude works, a pane drops in with a radar of the traffic around you, or the sky as you'd see it out your window. Ask Claude "what's that plane?" and it answers from live data.
+Live aircraft over wherever you are, inside Claude Code. You hear a jet, glance down, and it's already named in your status line: `✈ UAL88 · Boeing 787-9 to Tokyo · 3,200 ft climbing · 2.1 nm NE`, the one you're actually hearing, not just the nearest on a map. When something worth seeing happens (a low pass, a police helicopter, an aircraft you've asked to watch for, an emergency), a radar drops in on it. Ask Claude "what's that plane?" and it answers from live data.
 
 - **Radar**: aircraft around home over a real map (coastline and sea, lakes and rivers, runways, airport codes from OpenStreetMap), colored by altitude on tar1090's scale or by what they're doing, with trails, a one-minute leader line, and labels. Drag to pan, double-click to zoom.
 - **Emergencies and interesting aircraft**: an aircraft squawking 7500/7600/7700 or declaring an emergency flashes red, goes to the top of the list and the status line, and raises a toast at any hour. Military aircraft are tagged and toasted; helicopters are tagged.
@@ -9,13 +9,14 @@ Live aircraft over wherever you are, inside Claude Code. While Claude works, a p
 - **Who's flying**: the five nearest aircraft, each on a digit key, with the airline, aircraft model, registration and route (PIT → Boston). Routes are checked against the aircraft's position, so a stale route database can't show a wrong one.
 - **Interesting aircraft**: about 17,000 airframes spotters have tagged (plane-alert-db): police, air ambulances, governments, coast guard, firefighters, historic, air forces. A ★ on the radar, a toast, and their own tally on the life list.
 - **Watches in plain English**: `/radar watch any 747 within 20 miles` becomes a standing alert (one quick model call to understand it, then checked locally on every poll). Claude can set them too, through `overhead_watch`.
-- **The airport strip**: the busiest airport nearby, its live METAR (flight category, wind, ceiling) and the runways it's landing and departing on, read from the aircraft lined up with them. Landing runways show green on the radar, approach dashed.
+- **The airport strip**: the busiest airport nearby, its live METAR (flight category, wind, ceiling), the runways it's landing and departing on (read from the aircraft lined up with them), and where that traffic passes you: "arrivals for 27 pass 1.8 nm S of you at ~2,600 ft". Landing runways show green on the radar, approach dashed.
 - **Photos**: the picked aircraft's photo from Planespotters, credited and linked; pixels in kitty/Ghostty, cells elsewhere, a picture in Desktop.
 - **Rewind and the session line**: scrub the radar back up to 30 minutes, and get a line under each longer answer saying what flew over while Claude worked.
 - **`overhead_now`**: a tool Claude can call to answer questions about the aircraft around you.
 - **Pass alerts**: a toast when an aircraft is about to pass within 1 km, with quiet hours.
 - **Life list**: every type and operator you've seen from home, with a toast for new or rare ones.
-- **A status line**: the nearest airborne aircraft, kept current while the pane is closed.
+- **A status line**: the aircraft you're most likely hearing (closest through the air, so a low climber beats a jet at 35,000 ft overhead), kept current while the pane is closed.
+- **Scope theme**: `t` turns the radar into an old ATC scope: green phosphor, a sweep line, blips that flare as it passes and fade after.
 
 Home is your city from your IP address by default, looked up again each session so it follows your laptop. Pin it exactly with `/radar home <place>`.
 
@@ -46,6 +47,8 @@ Claude Code draws its `Image` element only in kitty and Ghostty; everywhere else
 | --- | --- |
 | `/radar` | Open or close the radar. Opening it yourself keeps it open between turns |
 | `/radar view radar\|window` | Top-down, or the sky out of a window (`v` in the pane swaps) |
+| `/radar theme map\|scope` | The map, or an old ATC scope (`t`) |
+| `/radar fov <deg>` | How wide the window view is (about 60° for a window seen from a desk); `/radar calibrate` walks through lining it up, `j`/`k` nudge 2° |
 | `/radar face <dir>` | Which way the window faces: `N`, `SW`, `135`, or `auto` |
 | `/radar home [<place>\|auto]` | Show home, pin it to a place (`Somerville, MA`, `Lyon`, `48.85,2.35`), or follow your IP again |
 | `/radar range <nm>` | How far the radar reaches (`z`/`x` zoom in the pane) |
@@ -58,14 +61,16 @@ Claude Code draws its `Image` element only in kitty and Ghostty; everywhere else
 | `/radar photos on\|off` | The picked aircraft's photo (`p`) |
 | `/radar summary on\|off` | The line under longer answers about what flew over |
 | `/radar colors altitude\|status` | Color by height, or by arriving/departing/cruising (`a`) |
-| `/radar auto on\|off` | Drop in after 5 s of Claude working (on once you've used `/radar`) |
+| `/radar auto events\|always\|off` | When the pane drops in by itself: when something worth seeing happens (the default once you've used `/radar`), 5 s into every turn, or never |
 | `/radar alerts on\|off\|quiet 22-7` | Pass alerts, and the hours they stay quiet |
 | `/radar list` | Your life list |
 | `/radar off` | Stop polling and dropping in until the next `/radar` |
 
 In the pane, `1`–`5` pick an aircraft from the list, and clicking one on the picture picks it too. Drag the radar to move around the map, double-click to zoom in on a spot, and press `c` (or `/radar center`) to put home back in the middle. Dragging the window view turns it. Pane keys work once the pane has focus: `/radar` gives it focus, and ctrl+x tab or a click does too.
 
-The pane gets out of the way the moment Claude needs you: a permission prompt or a question closes a pane that opened by itself. One you opened stays.
+The pane gets out of the way the moment Claude needs you: a permission prompt or a question closes a pane that opened by itself. One that dropped in for an event leaves after 90 s unless you touch it. One you opened stays.
+
+Pass alerts are for low passes (3,000 ft or below) and novel aircraft only; under a busy approach, routine low passes toast at most once every 15 minutes.
 
 ## Data and privacy
 

@@ -1,11 +1,19 @@
 {
   "name": "overhead",
   "displayName": "Overhead",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Live aircraft over wherever you are, in a pane while Claude works: a radar, the sky out your window, and a tool for 'what plane is that?'",
-  "author": { "name": "Trevor Stenson" },
+  "author": {
+    "name": "Trevor Stenson"
+  },
   "homepage": "https://github.com/trevorstenson/overhead",
   "repository": "https://github.com/trevorstenson/overhead",
   "license": "MIT",
-  "keywords": ["aircraft", "ads-b", "radar", "flight-tracker", "mod"]
+  "keywords": [
+    "aircraft",
+    "ads-b",
+    "radar",
+    "flight-tracker",
+    "mod"
+  ]
 }

@@ -999,3 +999,13 @@ test('the window view can be lined up with a real window: fov, nudges and a read
   expect(controls.at(-1)).toContain('face 102')
   expect((await $.command.run({ command: 'radar', args: 'calibrate' })).text).toContain('Press j or k')
 })
+
+test('t turns the radar into an old ATC scope, and back', async ($, on) => {
+  const { ui, controls } = await openWithMap($, on)
+  expect(controls.at(-1)).toContain('theme map')
+  await ui.press({ key: 'theme' })
+  expect(controls.at(-1)).toContain('theme scope')
+  // Colors don't apply to phosphor
+  expect(await ui.find({ key: 'colors' })).toBeUndefined()
+  expect((await $.command.run({ command: 'radar', args: 'theme map' })).text).toBe('The map: coast, runways, altitude colors.')
+})
