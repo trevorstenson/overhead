@@ -1,0 +1,4 @@
+skyd/target/
+dist/
+skyd-download.tar.gz
+.claude-plugin/types/

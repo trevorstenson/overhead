@@ -1,0 +1,13 @@
+{
+  "name": "overhead",
+  "description": "Overhead: live aircraft over wherever you are, in Claude Code",
+  "owner": {
+    "name": "Trevor Stenson"
+  },
+  "plugins": [
+    {
+      "name": "overhead",
+      "source": "./"
+    }
+  ]
+}
