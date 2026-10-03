@@ -73,7 +73,11 @@ pub trait Source: Send {
 pub struct AdsbLol {
     agent: ureq::Agent,
     url: String,
+    /// The interval asked for, and the one in force: longer after adsb.lol
+    /// says to slow down, easing back after a run of good answers
     interval: Duration,
+    pace: Duration,
+    good_in_a_row: u32,
     shared: Option<std::path::PathBuf>,
     /// What the last refusal's Retry-After asked for
     retry_after: Option<Duration>,
@@ -100,7 +104,7 @@ impl AdsbLol {
         let radius = radius_nm.clamp(1.0, 250.0).round();
         let url = format!("https://api.adsb.lol/v2/point/{lat:.4}/{lon:.4}/{radius}");
         let shared = crate::cache::cache_dir().map(|d| d.join(format!("feed-{lat:.4}-{lon:.4}-{radius}.json")));
-        Self { agent, url, interval, shared, retry_after: None }
+        Self { agent, url, interval, pace: interval, good_in_a_row: 0, shared, retry_after: None }
     }
 }
 
@@ -141,17 +145,24 @@ impl Source for AdsbLol {
         let mut response = self.agent.get(&self.url).call().map_err(|e| format!("couldn't reach adsb.lol: {e}"))?;
         let status = response.status().as_u16();
         if status == 429 || status == 503 {
-            // Asked to slow down: wait as long as it says, a minute if it doesn't
+            // Asked to slow down: wait as long as it says (half a minute if it
+            // doesn't), and from then on ask less often
             let wait = response
                 .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.trim().parse::<u64>().ok())
                 .map(Duration::from_secs)
-                .unwrap_or(Duration::from_secs(60))
+                .unwrap_or(Duration::from_secs(30))
                 .clamp(Duration::from_secs(10), Duration::from_secs(600));
             self.retry_after = Some(wait);
-            return Err(format!("adsb.lol is rate-limiting this IP; trying again in {} s", wait.as_secs()));
+            self.pace = self.pace.mul_f64(1.5).min(Duration::from_secs(30));
+            self.good_in_a_row = 0;
+            return Err(format!(
+                "adsb.lol asked us to slow down; positions are estimated until it answers (about {} s), then every {} s",
+                wait.as_secs(),
+                self.pace.as_secs()
+            ));
         }
         if status != 200 {
             return Err(format!("adsb.lol answered {status}"));
@@ -159,11 +170,17 @@ impl Source for AdsbLol {
         let body = response.body_mut().read_to_string().map_err(|e| format!("adsb.lol's answer was cut off: {e}"))?;
         let aircraft = parse_readsb(&body)?;
         self.share(&body);
+        // A long run of good answers: try a little faster again
+        self.good_in_a_row += 1;
+        if self.good_in_a_row >= 20 && self.pace > self.interval {
+            self.pace = self.pace.mul_f64(0.85).max(self.interval);
+            self.good_in_a_row = 0;
+        }
         Ok(aircraft)
     }
 
     fn interval(&self) -> Duration {
-        self.interval
+        self.pace
     }
 
     fn retry_after(&self) -> Option<Duration> {

@@ -8,8 +8,9 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// Never extrapolate further than this past a fix: a track that stopped
-/// reporting shouldn't fly off across the map
-const MAX_RECKON: Duration = Duration::from_secs(20);
+/// reporting shouldn't fly off across the map, but one the feed is merely
+/// slow about (a rate-limited minute) should keep moving
+const MAX_RECKON: Duration = Duration::from_secs(90);
 const DROP_AFTER: Duration = Duration::from_secs(60);
 const EASE_SECONDS: f64 = 0.6;
 const TRAIL_EVERY: Duration = Duration::from_secs(2);

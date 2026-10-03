@@ -1715,7 +1715,14 @@ export function register(on) {
               ...[photoTree($.ui.resolve(e), mode)].filter(Boolean),
             ]
           : []),
-        ...(lastError ? [Text({ color: 'yellow', wrap: 'wrap', children: [lastError] })] : []),
+        // Being asked to slow down is routine, not an error: the map carries on
+        ...(lastError
+          ? [
+              lastError.startsWith('adsb.lol asked')
+                ? Text({ dimColor: true, wrap: 'wrap', children: ['⏳ ' + lastError] })
+                : Text({ color: 'yellow', wrap: 'wrap', children: [lastError] }),
+            ]
+          : []),
         // The keys, onto a second line when the pane is narrow
         Box({
           flexDirection: 'row',
