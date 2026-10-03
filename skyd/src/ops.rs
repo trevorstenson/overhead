@@ -37,6 +37,21 @@ pub struct Metar {
     pub raw: Option<String>,
 }
 
+/// Where the traffic for a runway in use passes home: arrivals down the
+/// approach, departures out along the climb
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct OverHome {
+    /// `arrivals` or `departures`
+    pub kind: &'static str,
+    pub runway: String,
+    /// How far from home the path passes
+    pub offset_nm: f64,
+    /// Which way from home the path is: N, NE…
+    pub toward: &'static str,
+    /// Roughly how high they are there
+    pub alt_ft: i64,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Default)]
 pub struct Report {
     /// IATA code where there is one
@@ -46,6 +61,8 @@ pub struct Report {
     pub landing: Vec<String>,
     pub departing: Vec<String>,
     pub metar: Option<Metar>,
+    /// The paths in use that pass near home, nearest first
+    pub over_home: Vec<OverHome>,
     /// The landing runway ends, threshold to far end, for the radar to mark
     #[serde(skip)]
     pub landing_lines: Vec<(Point, Point)>,
@@ -110,7 +127,8 @@ impl Ops {
             .filter(|(_, _, _, name)| landing.contains(name))
             .map(|(threshold, far, _, _)| (threshold, far))
             .collect();
-        Some(Report { airport: name.clone(), icao, landing, departing, metar, landing_lines })
+        let over_home = over_home(&runways, &landing, &departing);
+        Some(Report { airport: name.clone(), icao, landing, departing, metar, over_home, landing_lines })
     }
 }
 
@@ -214,6 +232,58 @@ pub fn runway_use(runways: &[&Runway], airport: Point, store: &Store, now: Insta
     (busiest(landing), busiest(departing))
 }
 
+const COMPASS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+/// A three-degree glidepath: about 318 ft for every nm out
+const GLIDE_FT_PER_NM: f64 = 318.0;
+/// A typical airliner's early climb
+const CLIMB_FT_PER_NM: f64 = 700.0;
+
+/// Where the arrivals and departures for the runways in use pass home (the
+/// origin): arrivals down the extended centreline up to 20 nm out on a
+/// three-degree glidepath, departures straight out for 10 nm (they turn
+/// after that, so further out would be a guess). Only paths within 3 nm of
+/// home, and at least 1.5 nm out from the runway: beside the field itself is
+/// no prediction.
+pub fn over_home(runways: &[&Runway], landing: &[String], departing: &[String]) -> Vec<OverHome> {
+    let mut found = Vec::new();
+    for r in runways {
+        for (threshold, far, _, name) in ends(r) {
+            let (dx, dy) = (far.x - threshold.x, far.y - threshold.y);
+            let len = dx.hypot(dy).max(1e-9);
+            let (ux, uy) = (dx / len, dy / len);
+            // Home measured along the runway's line and off it
+            let path = |from: Point, outward: f64, reach: f64, ft_per_nm: f64, kind: &'static str| {
+                let (rx, ry) = (-from.x, -from.y);
+                let along = (rx * ux + ry * uy) * outward;
+                let off = rx * uy - ry * ux;
+                // Out on the path, not at the field, and near enough to be overhead-ish
+                if along < 1.5 || along > reach || off.abs() > 3.0 {
+                    return None;
+                }
+                // The nearest point of the path, seen from home
+                let (px, py) = (from.x + ux * along * outward, from.y + uy * along * outward);
+                let toward = COMPASS[((px.atan2(py).to_degrees().rem_euclid(360.0) / 45.0).round() as usize) % 8];
+                Some(OverHome {
+                    kind,
+                    runway: name.clone(),
+                    offset_nm: (off.abs() * 10.0).round() / 10.0,
+                    toward,
+                    alt_ft: ((along * ft_per_nm / 100.0).round() * 100.0) as i64,
+                })
+            };
+            if landing.contains(&name) {
+                // Arrivals come in toward the threshold: out is backward
+                found.extend(path(threshold, -1.0, 20.0, GLIDE_FT_PER_NM, "arrivals"));
+            }
+            if departing.contains(&name) {
+                found.extend(path(far, 1.0, 10.0, CLIMB_FT_PER_NM, "departures"));
+            }
+        }
+    }
+    found.sort_by(|a, b| a.offset_nm.total_cmp(&b.offset_nm));
+    found
+}
+
 fn fetch_metar(icao: &str) -> Option<Metar> {
     let body = http_agent()
         .get(&format!("https://aviationweather.gov/api/data/metar?ids={icao}&format=json"))
@@ -284,6 +354,21 @@ mod tests {
         let (landing, departing) = runway_use(&[&r], Point::default(), &store, now);
         assert_eq!(landing, vec!["9".to_string()]);
         assert!(departing.is_empty());
+    }
+
+    #[test]
+    fn finds_where_arrivals_pass_home() {
+        // Runway 9 runs east from 10 nm east of home; home sits 6 nm out on
+        // its approach, half a mile north of the centreline
+        let r = Runway { a: Point { x: 6.0, y: -0.5 }, b: Point { x: 7.5, y: -0.5 }, refs: "9/27".into() };
+        let paths = over_home(&[&r], &["9".to_string()], &[]);
+        assert_eq!(paths.len(), 1);
+        let p = &paths[0];
+        assert_eq!((p.kind, p.runway.as_str(), p.offset_nm, p.toward), ("arrivals", "9", 0.5, "S"));
+        // 6 nm out on a three-degree path
+        assert_eq!(p.alt_ft, 1900);
+        // Landing the other way, the approach is on the far side: no pass
+        assert!(over_home(&[&r], &["27".to_string()], &[]).is_empty());
     }
 
     #[test]

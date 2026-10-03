@@ -997,6 +997,10 @@ function opsParts() {
       m?.visibility && m.visibility !== '10+' ? 'visibility ' + m.visibility + ' sm' : null,
       ops.landing.length ? 'landing ' + ops.landing.slice(0, 3).join(' ') : null,
       ops.departing.length ? 'departing ' + ops.departing.slice(0, 3).join(' ') : null,
+      // The prediction that matters at home: where that traffic passes you
+      ...(ops.over_home ?? [])
+        .slice(0, 1)
+        .map((p) => p.kind + ' for ' + p.runway + ' pass ' + p.offset_nm + ' nm ' + p.toward + ' of you at ~' + p.alt_ft.toLocaleString('en-US') + ' ft'),
     ].filter(Boolean),
   }
 }

@@ -809,6 +809,7 @@ test('the airport strip shows the weather and the runways in use, and Claude hea
     icao: 'KBOS',
     landing: ['4R', '4L'],
     departing: ['9'],
+    over_home: [{ kind: 'arrivals', runway: '4R', offset_nm: 1.8, toward: 'E', alt_ft: 2600 }],
     metar: { icao: 'KBOS', name: 'Boston/Logan Intl', category: 'MVFR', wind_dir: 40, wind_kt: 12, gust_kt: 20, visibility: '4', ceiling_ft: 1800, temp_c: 12, raw: 'METAR KBOS 030254Z 04012G20KT 4SM BKN018' },
   }
   skydSays = '@aircraft ' + JSON.stringify(AIRCRAFT) + '\n@ops ' + JSON.stringify(ops) + '\n'
@@ -824,7 +825,7 @@ test('the airport strip shows the weather and the runways in use, and Claude hea
   await world.clock.settle()
   expect((await ui.find({ type: 'Text', text: 'MVFR' }))).toBeDefined()
   expect((await ui.find({ type: 'Text', text: /wind 040° 12G20 kt/ }))?.text).toBe(
-    '· wind 040° 12G20 kt · ceiling 1,800 ft · visibility 4 sm · landing 4R 4L · departing 9',
+    '· wind 040° 12G20 kt · ceiling 1,800 ft · visibility 4 sm · landing 4R 4L · departing 9 · arrivals for 4R pass 1.8 nm E of you at ~2,600 ft',
   )
   const answer = await $.tool.call({ tool: 'mcp__overhead__overhead_now' } as never)
   skydSays = ''
