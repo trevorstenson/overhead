@@ -64,8 +64,17 @@ let photoColumns = 36
 let watches = []
 // When each watch last fired for each aircraft, by "id:hex"
 const watchFired = new Map()
-// Whether the pane drops in while Claude works; on once /radar has been used
-let isAuto = false
+// When the pane drops in by itself: 'events' (something worth seeing just
+// happened), 'always' (five seconds into every turn), or 'off'. Events once
+// /radar has been used.
+let autoMode = 'off'
+// A pane dropped in for an event leaves after this, unless it's touched
+const EVENT_STAY_MS = 90 * 1000
+let eventTimer = null
+// Routine low passes toast at most this often; novel aircraft always do
+const ROUTINE_PASS_GAP_MS = 15 * 60 * 1000
+const LOW_PASS_FT = 3000
+let lastRoutinePass = -Infinity
 // Toasts when an aircraft is about to pass overhead
 let isAlerting = true
 let quiet = DEFAULT_QUIET
@@ -663,6 +672,38 @@ function closestAirborne() {
   return airborne()[0] ?? null
 }
 
+// Feet in a nautical mile: altitude and distance on one scale
+const FT_PER_NM = 6076
+
+// The aircraft you're most likely hearing: the shortest way through the air,
+// not across the ground. A climber at 3,000 ft two miles off beats a jet at
+// 35,000 ft straight up.
+function heard() {
+  let best = null
+  let bestNm = Infinity
+  for (const a of airborne()) {
+    if (a.alt_ft == null) continue
+    const nm = Math.hypot(a.distance_nm, a.alt_ft / FT_PER_NM)
+    if (nm < bestNm) [best, bestNm] = [a, nm]
+  }
+  return best
+}
+
+// "UA88 · Boeing 787-9 to Tokyo · 3,200 ft climbing · 2.1 nm NE"
+function heardText(a) {
+  const model = a.model && a.model.length <= 22 ? a.model : a.type
+  const to = a.route ? 'to ' + (a.route.to.city || a.route.to.code) : null
+  const trend = Math.abs(a.vrate_fpm) < 300 ? '' : a.vrate_fpm > 0 ? ' climbing' : ' descending'
+  const { before, after } = flags(a)
+  return (
+    before +
+    [a.callsign ?? a.registration ?? a.hex, [model, to].filter(Boolean).join(' '), a.alt_ft.toLocaleString('en-US') + ' ft' + trend, a.distance_nm + ' nm ' + compass(a.bearing_deg)]
+      .filter(Boolean)
+      .join(' · ') +
+    after
+  )
+}
+
 function altitude(a) {
   return a.alt_ft == null ? 'ground' : a.alt_ft.toLocaleString('en-US') + ' ft'
 }
@@ -715,10 +756,12 @@ function duration(minutes) {
 }
 
 // The nearest airborne aircraft, or one in an emergency, which comes first
+// An emergency if there is one, else the aircraft you're probably hearing
 function statusText() {
-  const a = closestAirborne()
-  if (!a) return undefined
-  return (a.emergency ? '' : '✈ ') + describe(a)
+  const emergency = airborne().find((a) => a.emergency)
+  if (emergency) return describe(emergency)
+  const a = heard()
+  return a ? '✈ ' + heardText(a) : undefined
 }
 
 // ---- pane ----------------------------------------------------------------
@@ -730,12 +773,23 @@ function isQuietAt(hour) {
   return quiet.from < quiet.to ? hour >= quiet.from && hour < quiet.to : hour >= quiet.from || hour < quiet.to
 }
 
+// Under a busy approach a pass is routine many times an hour, so only a low
+// one or a novel one (tagged, military, rare, or a type not on your list yet)
+// is worth a word, and a routine low one only every quarter hour
 async function announcePass($, pass) {
-  if (!isAlerting) return
   const now = await $.clock.now()
-  if (isQuietAt(new Date(now).getHours())) return
   if (now - (announced.get(pass.hex) ?? -Infinity) < 10 * 60 * 1000) return
+  const info = aircraft.find((a) => a.hex === pass.hex)
+  lifeList ??= (await $.store.get('lifeList')) ?? { types: {}, operators: {} }
+  const isNovel = Boolean(info?.interest || info?.military || RARE_TYPES.has(pass.type) || (pass.type && !lifeList.types?.[pass.type]))
+  const isLow = pass.alt_ft != null && pass.alt_ft <= LOW_PASS_FT
+  if (!isNovel && !isLow) return
+  if (!isNovel && now - lastRoutinePass < ROUTINE_PASS_GAP_MS) return
   announced.set(pass.hex, now)
+  if (!isNovel) lastRoutinePass = now
+  if (isQuietAt(new Date(now).getHours())) return
+  await dropInFor($, pass.hex)
+  if (!isAlerting) return
   const name = pass.callsign ?? pass.hex
   const what = pass.model ?? pass.type
   const route = pass.route ? pass.route.from.code + '→' + pass.route.to.code : null
@@ -748,6 +802,8 @@ async function announcePass($, pass) {
 // emergency toasts at any hour, while alerts are on; military keeps quiet hours.
 async function announceAlert($, alert) {
   const now = await $.clock.now()
+  // Emergencies drop in at any hour; the rest keep quiet hours
+  if (alert.kind === 'emergency' || !isQuietAt(new Date(now).getHours())) await dropInFor($, alert.hex)
   if (turnSky) (alert.kind === 'emergency' ? turnSky.emergencies : turnSky.interesting).push(alert)
   // On the life list whatever the hour, counted apart from the types
   if (alert.kind !== 'emergency') {
@@ -909,6 +965,7 @@ async function checkWatches($) {
       const key = w.id + ':' + a.hex
       if (now - (watchFired.get(key) ?? -Infinity) < 6 * 3600 * 1000) continue
       watchFired.set(key, now)
+      if (!isQuietAt(new Date(now).getHours())) await dropInFor($, a.hex)
       turnSky?.interesting.push({ ...a, kind: 'watch' })
       if (!isAlerting) continue
       const where = a.distance_nm + ' nm ' + compass(a.bearing_deg) + (a.alt_ft == null ? ' on the ground' : ' at ' + a.alt_ft.toLocaleString('en-US') + ' ft')
@@ -1004,9 +1061,11 @@ async function recordSightings($, flying) {
   }
   if (!changed) return
   await $.store.set('lifeList', lifeList)
-  if (!isAlerting || isQuietAt(new Date(now).getHours())) return
+  if (isQuietAt(new Date(now).getHours())) return
   // One toast at a time; the list keeps the rest
   const pick = news.find((n) => n.why === 'rare') ?? news[0]
+  if (pick) await dropInFor($, pick.a.hex)
+  if (!isAlerting) return
   if (pick) {
     const what = (pick.a.model ?? pick.a.type) + (pick.a.owner ? ' · ' + pick.a.owner : '')
     $.ui.toast((pick.why === 'rare' ? '✦ Rare: ' : '✦ New for your list: ') + what + ' (' + (pick.a.callsign ?? pick.a.hex) + ')', { timeoutMs: 8000 })
@@ -1056,6 +1115,8 @@ function toolText(limit) {
     'Home: ' + where + ' at ' + home.lat.toFixed(3) + ', ' + home.lon.toFixed(3) + '.',
     up.length + ' airborne and ' + (aircraft.length - up.length) + ' on the ground within about ' + Math.round(rangeNm * 1.5) + ' nm. Directions are from home.',
   ]
+  const loud = heard()
+  if (loud) lines.push('Most likely the one the user hears (closest through the air): ' + heardText(loud) + '.')
   if (ops) lines.push('Nearest busy airport: ' + opsText() + (ops.metar?.raw ? ' (' + ops.metar.raw + ')' : '') + '.')
   const overhead = up.filter((a) => a.distance_nm <= 1)
   if (overhead.length) lines.push('Directly overhead (within 1 nm): ' + overhead.map((a) => a.callsign ?? a.hex).join(', ') + '.')
@@ -1080,6 +1141,42 @@ async function answerTool($, input) {
   return toolText(limit)
 }
 
+// ---- dropping in for an event ------------------------------------------------
+
+function autoModeText() {
+  return autoMode === 'events' ? 'when something worth seeing happens' : autoMode === 'always' ? AUTO_DELAY_MS / 1000 + ' s into every turn' : 'never: only when you ask'
+}
+
+// Something worth seeing just happened: open the pane on that aircraft,
+// without the keys, and leave after a while unless it's touched
+async function dropInFor($, hex) {
+  if (autoMode !== 'events' || phase !== 'idle' || isDismissed) return
+  const surfaces = await $.session.surfaces()
+  if (!(surfaces.includes('terminal') || surfaces.includes('desktop'))) return
+  const opened = await $.ui.open({ id: PANE, title: 'overhead' })
+  if (!opened.isPlaced) {
+    await $.ui.close({ id: PANE })
+    return
+  }
+  phase = 'auto'
+  selected = hex
+  photo = null
+  await showRadar($)
+  eventTimer?.cancel()
+  eventTimer = $.clock.after(EVENT_STAY_MS, () => {
+    eventTimer = null
+    if (phase === 'auto') void $.ui.close({ id: PANE })
+  })
+}
+
+// The person did something in a pane that dropped in: it's theirs now
+function keepOpen() {
+  if (phase !== 'auto') return
+  phase = 'pinned'
+  eventTimer?.cancel()
+  eventTimer = null
+}
+
 // ---- dropping in while Claude works ----------------------------------------
 
 function cancelTimer() {
@@ -1088,7 +1185,7 @@ function cancelTimer() {
 }
 
 function armDropIn($) {
-  if (!isAuto || !isTurnRunning || isDismissed || phase !== 'idle') return
+  if (autoMode !== 'always' || !isTurnRunning || isDismissed || phase !== 'idle') return
   phase = 'waiting'
   timer = $.clock.after(AUTO_DELAY_MS, () => dropIn($))
 }
@@ -1142,9 +1239,10 @@ async function getOutOfTheWay($) {
 // The person asked for the radar: it stays open between turns
 async function openRadar($) {
   cancelTimer()
-  if (!isAuto) {
-    isAuto = true
-    await $.store.set('isAuto', true)
+  // Using the radar once is what lets it drop in later, for events
+  if ((await $.store.get('autoMode')) == null) {
+    autoMode = 'events'
+    await $.store.set('autoMode', autoMode)
   }
   phase = 'pinned'
   // The person asked for it, so its keys are theirs at once; Esc hands them
@@ -1239,6 +1337,7 @@ async function toggleFollow($) {
 }
 
 async function select($, hex) {
+  keepOpen()
   selected = selected === hex ? null : hex
   photo = null
   if (!selected) isFollowing = false
@@ -1247,6 +1346,7 @@ async function select($, hex) {
 }
 
 async function toggleView($) {
+  keepOpen()
   view = view === 'radar' ? 'window' : 'radar'
   await $.store.set('view', view)
   await writeControl($)
@@ -1265,6 +1365,7 @@ function parseFace(text) {
 // Dragging the radar moves the map under the pointer; dragging the window
 // turns it, a full picture's width being its 90° field of view
 async function drag($, dx, dy) {
+  keepOpen()
   if (view === 'window') {
     const from = typeof face === 'number' ? face : faceNow ?? 180
     face = Math.round((((from - dx * 90) % 360) + 360) % 360)
@@ -1296,6 +1397,7 @@ async function recenter($) {
 }
 
 async function zoom($, step) {
+  keepOpen()
   const index = RANGES_NM.indexOf(rangeNm)
   const next = RANGES_NM[Math.max(0, Math.min(RANGES_NM.length - 1, (index < 0 ? 3 : index) + step))]
   if (next === rangeNm) return
@@ -1325,7 +1427,8 @@ const HELP = [
   '/radar summary on|off  a line under each longer answer: what flew over while Claude worked',
   '/radar view radar|window   top-down, or the sky out of a window (v swaps)',
   '/radar face <dir>      which way the window faces: N, SW, 135 or auto',
-  '/radar auto on|off     drop in while Claude works (on once you use /radar)',
+  '/radar auto events|always|off   drop in when something worth seeing happens (default),',
+  '                       5 s into every turn, or never',
   '/radar alerts on|off   a toast when an aircraft is about to pass overhead',
   '/radar alerts quiet 22-7  no alerts between these hours',
   '/radar list            the types and operators you have seen',
@@ -1355,8 +1458,8 @@ async function runCommand($, args) {
   if (verb === 'off') {
     if (isOpen) await $.ui.close({ id: PANE })
     withdrawOffer($)
-    isAuto = false
-    await $.store.set('isAuto', false)
+    autoMode = 'off'
+    await $.store.set('autoMode', autoMode)
     await stopSkyd($)
     return { text: 'overhead is off: no polling and no dropping in. /radar turns it back on.' }
   }
@@ -1390,11 +1493,14 @@ async function runCommand($, args) {
     return { text: isAlerting ? 'A toast when an aircraft is about to pass overhead.' : 'No pass alerts.' }
   }
   if (verb === 'auto') {
-    if (arg !== 'on' && arg !== 'off') return { text: 'Dropping in while Claude works is ' + (isAuto ? 'on' : 'off') + '. /radar auto on|off changes it.' }
-    isAuto = arg === 'on'
-    await $.store.set('isAuto', isAuto)
-    if (!isAuto && phase !== 'pinned') await getOutOfTheWay($)
-    return { text: isAuto ? 'The radar drops in after ' + AUTO_DELAY_MS / 1000 + ' s of Claude working.' : 'The radar opens only when you ask for it.' }
+    const mode = arg === 'on' ? 'events' : arg
+    if (!['events', 'always', 'off'].includes(mode)) {
+      return { text: 'The radar drops in: ' + autoModeText() + '. /radar auto events|always|off changes it.' }
+    }
+    autoMode = mode
+    await $.store.set('autoMode', autoMode)
+    if (autoMode !== 'always' && phase !== 'pinned') await getOutOfTheWay($)
+    return { text: 'The radar drops in ' + autoModeText() + '.' }
   }
   if (verb === 'watch') {
     if (!arg) return { text: watchList() }
@@ -1499,7 +1605,8 @@ export function register(on) {
   on('session.start', async ($, e, next) => {
     home = (await $.store.get('home')) ?? null
     rangeNm = (await $.store.get('rangeNm')) ?? DEFAULT_RANGE_NM
-    isAuto = (await $.store.get('isAuto')) === true
+    // Before modes, a yes/no that meant "every turn"; events is the kinder reading
+    autoMode = (await $.store.get('autoMode')) ?? ((await $.store.get('isAuto')) === true ? 'events' : 'off')
     view = (await $.store.get('view')) ?? 'radar'
     colors = (await $.store.get('colors')) ?? 'altitude'
     isSummary = (await $.store.get('isSummary')) ?? true
@@ -1511,7 +1618,7 @@ export function register(on) {
     await $.command.register({
       name: 'radar',
       description: 'Live aircraft overhead, wherever you are',
-      argumentHint: '[view radar|window | face <dir> | home <place> | range <nm> | auto on|off | alerts on|off | off | help]',
+      argumentHint: '[watch <words> | view radar|window | face <dir> | home <place> | range <nm> | auto events|always|off | alerts on|off | off | help]',
     })
     await $.tool.register({
       name: 'overhead_watch',
@@ -1536,6 +1643,8 @@ export function register(on) {
     if (e.id !== PANE) return next(e)
     if (e.origin?.kind === 'person' && isTurnRunning) isDismissed = true
     cancelTimer()
+    eventTimer?.cancel()
+    eventTimer = null
     phase = 'idle'
     isOpen = false
     fpsTimer?.cancel()

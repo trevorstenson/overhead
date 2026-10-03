@@ -78,7 +78,8 @@ test('opening the radar finds home from the IP and shows the nearest airborne ai
   await clock.settle()
 
   expect(spawned[0]).toEqual(expect.arrayContaining(['run', '--lat', '42.3876', '--mode', 'cells', '--columns', '100']))
-  expect(statuses).toContain('✈ JBU1786 · A21N · 6.2 nm NW · 8,375 ft')
+  // The one you'd hear: closest through the air, with what it's doing
+  expect(statuses).toContain('✈ JBU1786 · A21N · 8,375 ft descending · 6.2 nm NW')
   expect((await ui.find({ type: 'Text', text: /near Somerville/ }))?.text).toContain('(from your IP)')
 })
 
@@ -157,7 +158,7 @@ function blankCells(columns: number, rows: number) {
 
 // The world a lifecycle test runs in: a terminal session where skyd answers
 // with nothing, and every pane open and close recorded
-function lifecycleWorld($: any, on: any, store: Record<string, unknown> = { isAuto: true, home: SOMERVILLE }) {
+function lifecycleWorld($: any, on: any, store: Record<string, unknown> = { autoMode: 'always', home: SOMERVILLE }) {
   mock.store(on, store)
   const clock = mock.clock(on, { now: 1000 })
   mock.env(on, { TERM_PROGRAM: 'WarpTerminal' })
@@ -177,7 +178,12 @@ function lifecycleWorld($: any, on: any, store: Record<string, unknown> = { isAu
   on('turn.start', async (_$: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('turn.complete', async (_$: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('session.start', async (_$: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
-  on('ui.status', async () => ({ value: undefined }))
+  // What the status line said, newest last
+  const statuses: (string | undefined)[] = []
+  on('ui.status', async (_$: unknown, e: { text?: string }) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
   on('ui.open', async (_$: unknown, e: { focus?: boolean }) => {
     events.push(e.focus ? 'open:focus' : 'open')
     return { value: { isPlaced: true } }
@@ -198,7 +204,7 @@ function lifecycleWorld($: any, on: any, store: Record<string, unknown> = { isAu
     }
     return { value: { code: 0, signal: null } }
   })
-  return { clock, events, controls }
+  return { clock, events, controls, statuses }
 }
 
 test('the radar drops in after five seconds of a turn and leaves when it ends', async ($, on) => {
@@ -900,4 +906,79 @@ test('the Desktop app shows the photo as an embedded picture', async ($, on) => 
   const { ui } = await pickWithPhoto($, on, 'desktop', 'WarpTerminal')
   const svgs = await ui.findAll({ type: 'Svg' })
   expect(svgs.length).toBe(2)
+})
+
+test('the status line names the aircraft you would hear, not the one straight up', async ($, on) => {
+  const world = lifecycleWorld($, on)
+  const statuses = world.statuses
+  const cruiser = { ...AIRCRAFT[1], hex: 'c1', callsign: 'BAW212', type: 'B772', alt_ft: 35000, distance_nm: 0.4, vrate_fpm: 0 }
+  const climber = {
+    ...AIRCRAFT[1],
+    hex: 'c2',
+    callsign: 'UAL88',
+    type: 'B789',
+    model: 'Boeing 787-9',
+    alt_ft: 3200,
+    distance_nm: 2.1,
+    bearing_deg: 45,
+    vrate_fpm: 1800,
+    route: { from: { code: 'BOS', city: 'Boston', lat: 42.36, lon: -71 }, to: { code: 'HND', city: 'Tokyo', lat: 35.5, lon: 139.8 }, airline: null },
+  }
+  skydSays = '@aircraft ' + JSON.stringify([cruiser, climber]) + '\n'
+  await $.session.start({ cwd: '/tmp' } as never)
+  await $.command.run({ command: 'radar', args: '' })
+  await $.ui.mount({ plugin: 'overhead', surface: 'terminal', component: 'Pane', requestId: 'overhead', props: { title: 'overhead', isFocused: true, bodyColumns: 100, placement: 'dock' } as never })
+  await world.clock.settle()
+  skydSays = ''
+  // 35,000 ft is 5.8 nm up; the 787 is 2.1 nm off at 3,200 ft: about 2.2 nm
+  expect(statuses.at(-1)).toBe('✈ UAL88 · Boeing 787-9 to Tokyo · 3,200 ft climbing · 2.1 nm NE')
+})
+
+// Passes reported one after another, in a world where the A21N is already on
+// the life list; returns the toasts
+async function passToasts($: any, on: any, passes: object[]) {
+  const toasts: string[] = []
+  const world = lifecycleWorld($, on, { home: SOMERVILLE, lifeList: { types: { A21N: { name: null, first: 0, seen: 3 } }, operators: {} } })
+  await world.clock.set(new Date(2026, 9, 2, 14, 0).getTime())
+  on('ui.toast', async (_$: unknown, e: { text: string }) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  skydSays = passes.map((p) => '@overhead ' + JSON.stringify(p)).join('\n') + '\n'
+  await $.session.start({ cwd: '/tmp' } as never)
+  await $.command.run({ command: 'radar', args: '' })
+  await $.ui.mount({ plugin: 'overhead', surface: 'terminal', component: 'Pane', requestId: 'overhead', props: { title: 'overhead', isFocused: true, bodyColumns: 100, placement: 'dock' } as never })
+  await world.clock.settle()
+  skydSays = ''
+  return toasts
+}
+
+const PASS = { hex: 'p1', callsign: 'JBU1', type: 'A21N', model: null, alt_ft: 2400, in_s: 30, closest_nm: 0.3, route: null }
+
+test('a routine pass high up stays quiet', async ($, on) => {
+  expect(await passToasts($, on, [{ ...PASS, alt_ft: 9000 }])).toEqual([])
+})
+
+test('routine low passes toast once a quarter hour, a novel one always', async ($, on) => {
+  const toasts = await passToasts($, on, [PASS, { ...PASS, hex: 'p2', callsign: 'JBU2' }, { ...PASS, hex: 'p3', callsign: 'GTI8', type: 'B744', alt_ft: 30000 }])
+  expect(toasts).toEqual(['✈ JBU1 · A21N overhead in 30 s at 2,400 ft', '✈ GTI8 · B744 overhead in 30 s at 30,000 ft'])
+})
+
+test('in events mode the pane drops in on an interesting aircraft, and leaves after a while untouched', async ($, on) => {
+  const world = lifecycleWorld($, on, { autoMode: 'events', home: SOMERVILLE })
+  const interest = { group: 'police', category: 'Police Forces', operator: 'MSP', note: null }
+  const alert = { kind: 'interesting', hex: 'ae1234', callsign: 'MSP1', type: 'B407', model: null, squawk: null, what: null, interest, alt_ft: 1200, distance_nm: 2.5, bearing_deg: 180 }
+  on('ui.toast', async () => ({ value: undefined }))
+  await world.clock.set(new Date(2026, 9, 2, 14, 0).getTime())
+  await $.session.start({ cwd: '/tmp' } as never)
+  // Claude asks what's up, which starts skyd polling with the pane closed
+  skydSays = '@aircraft ' + JSON.stringify([{ ...AIRCRAFT[1], hex: 'ae1234', callsign: 'MSP1', interest }]) + '\n@alert ' + JSON.stringify(alert) + '\n'
+  const asking = $.tool.call({ tool: 'mcp__overhead__overhead_now' } as never)
+  await world.clock.advance(500)
+  await asking
+  skydSays = ''
+  expect(world.events).toEqual(['open'])
+  expect(world.controls.at(-1)).toContain('select ae1234')
+  await world.clock.advance(91 * 1000)
+  expect(world.events.at(-1)).toMatch(/^close/)
 })
